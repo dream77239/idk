@@ -1,0 +1,300 @@
+-- 锁定目标脚本 v2.2 (PC+Mobile)
+-- 新增功能：添加可隐藏/显示锁定按钮的小控制按钮
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local GuiService = game:GetService("GuiService")
+local TweenService = game:GetService("TweenService")
+
+-- 配置区（可自定义）--
+local SETTINGS = {
+    LockDuration = 6,          -- 锁定持续时间(秒)
+    FollowDistance = 3,        -- 与目标的距离(米)
+    PcHotkey = Enum.KeyCode.R, -- 电脑触发按键
+    MobileButtonSize = UDim2.new(0.2, 0, 0.1, 0), -- 手机按钮尺寸
+    MobileButtonPosition = UDim2.new(0.7, 0, 0.8, 0), -- 手机按钮位置
+    ToggleButtonSize = UDim2.new(0.05, 0, 0.05, 0), -- 隐藏/显示按钮尺寸
+    ToggleButtonPosition = UDim2.new(0.95, 0, 0.05, 0), -- 隐藏/显示按钮位置
+    ButtonColor = Color3.fromRGB(0, 120, 255), -- 按钮颜色
+    ToggleButtonColor = Color3.fromRGB(100, 100, 100) -- 隐藏/显示按钮颜色
+}
+
+-- 系统变量 --
+local LocalPlayer = Players.LocalPlayer
+local Character = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+local Humanoid = Character:WaitForChild("Humanoid")
+local RootPart = Character:WaitForChild("HumanoidRootPart")
+local Camera = workspace.CurrentCamera
+local followConnection = nil
+local mobileUI = {}
+
+-- 移动设备UI创建 --
+local function CreateMobileUI()
+    if UserInputService.TouchEnabled and not GuiService:IsTenFootInterface() then
+        -- 主界面
+        local screenGui = Instance.new("ScreenGui")
+        screenGui.Name = "LockTargetUI"
+        screenGui.ResetOnSpawn = false
+        screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+        
+        -- 锁定按钮
+        local lockButton = Instance.new("TextButton")
+        lockButton.Name = "LockButton"
+        lockButton.Size = SETTINGS.MobileButtonSize
+        lockButton.Position = SETTINGS.MobileButtonPosition
+        lockButton.Text = "🔒 锁定目标"
+        lockButton.TextScaled = true
+        lockButton.BackgroundColor3 = SETTINGS.ButtonColor
+        lockButton.TextColor3 = Color3.new(1, 1, 1)
+        lockButton.ZIndex = 10
+        lockButton.Visible = true -- 默认可见
+        
+        -- 按钮动画效果
+        lockButton.MouseButton1Down:Connect(function()
+            lockButton.Size = lockButton.Size - UDim2.new(0.02, 0, 0.02, 0)
+        end)
+        lockButton.MouseButton1Up:Connect(function()
+            lockButton.Size = SETTINGS.MobileButtonSize
+        end)
+        
+        -- 隐藏/显示切换按钮
+        local toggleButton = Instance.new("TextButton")
+        toggleButton.Name = "ToggleButton"
+        toggleButton.Size = SETTINGS.ToggleButtonSize
+        toggleButton.Position = SETTINGS.ToggleButtonPosition
+        toggleButton.Text = "◄" -- 默认显示为向左箭头(表示可以隐藏)
+        toggleButton.TextScaled = true
+        toggleButton.BackgroundColor3 = SETTINGS.ToggleButtonColor
+        toggleButton.TextColor3 = Color3.new(1, 1, 1)
+        toggleButton.ZIndex = 11 -- 比锁定按钮更高
+        
+        -- 切换按钮点击事件
+        toggleButton.MouseButton1Click:Connect(function()
+            lockButton.Visible = not lockButton.Visible
+            toggleButton.Text = lockButton.Visible and "◄" or "►"
+            
+            -- 小动画效果
+            toggleButton.Size = toggleButton.Size - UDim2.new(0.01, 0, 0.01, 0)
+            task.wait(0.1)
+            toggleButton.Size = SETTINGS.ToggleButtonSize
+        end)
+        
+        lockButton.Parent = screenGui
+        toggleButton.Parent = screenGui
+        
+        mobileUI.screenGui = screenGui
+        mobileUI.lockButton = lockButton
+        mobileUI.toggleButton = toggleButton
+        
+        return lockButton, toggleButton
+    end
+    return nil, nil
+end
+
+-- 取消锁定功能 --
+local function CancelLock()
+    if followConnection then
+        followConnection:Disconnect()
+        followConnection = nil
+    end
+    
+    -- 恢复控制
+    if Humanoid then
+        Humanoid.WalkSpeed = 16
+        Humanoid.JumpPower = 50
+        Humanoid.AutoRotate = true
+        Humanoid:SetAttribute("IsLocked", false)
+    end
+    
+    -- 提示音效（可选）
+    if Character and Character:FindFirstChild("HumanoidRootPart") then
+        local sound = Instance.new("Sound")
+        sound.SoundId = "rbxassetid://9046892392" -- 解锁音效ID
+        sound.Volume = 0.5
+        sound.Parent = Character.HumanoidRootPart
+        sound:Play()
+        game:GetService("Debris"):AddItem(sound, 3)
+    end
+end
+
+-- 找到最近的玩家 --
+local function FindNearestTarget()
+    local nearestPlayer, minDistance = nil, math.huge
+    
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local targetRoot = player.Character:FindFirstChild("HumanoidRootPart")
+            if targetRoot then
+                local distance = (RootPart.Position - targetRoot.Position).Magnitude
+                if distance < minDistance then
+                    minDistance = distance
+                    nearestPlayer = player
+                end
+            end
+        end
+    end
+    
+    return nearestPlayer
+end
+
+-- 平滑瞬移函数 --
+local function SmoothTeleport(cframe)
+    if not RootPart then return end
+    
+    local tweenInfo = TweenInfo.new(
+        0.3, -- 持续时间
+        Enum.EasingStyle.Quad, -- 缓动样式
+        Enum.EasingDirection.Out -- 缓动方向
+    )
+    
+    local tween = TweenService:Create(RootPart, tweenInfo, {CFrame = cframe})
+    tween:Play()
+    tween.Completed:Wait()
+end
+
+-- 锁定与跟随系统 --
+local function StartLockTarget()
+    -- 防止重复触发
+    if Humanoid:GetAttribute("IsLocked") then return end
+    Humanoid:SetAttribute("IsLocked", true)
+    
+    -- 找到目标
+    local targetPlayer = FindNearestTarget()
+    if not targetPlayer or not targetPlayer.Character then
+        warn("锁定失败：未找到有效目标")
+        Humanoid:SetAttribute("IsLocked", false)
+        return
+    end
+    
+    local targetRoot = targetPlayer.Character:WaitForChild("HumanoidRootPart")
+    
+    -- 禁用玩家控制
+    Humanoid.WalkSpeed = 0
+    Humanoid.JumpPower = 0
+    Humanoid.AutoRotate = false
+    
+    -- 计算初始位置（目标面前3米）
+    local function GetFollowPosition()
+        return targetRoot.Position + 
+               (targetRoot.CFrame.LookVector * -SETTINGS.FollowDistance) +
+               Vector3.new(0, 0.5, 0) -- 稍微抬高防止地面穿透
+    end
+    
+    -- 平滑瞬移到目标面前
+    SmoothTeleport(CFrame.new(GetFollowPosition(), targetRoot.Position))
+    
+    -- 持续跟随逻辑
+    followConnection = RunService.Heartbeat:Connect(function()
+        if not targetRoot or not RootPart then return end
+        
+        -- 计算新位置并保持面向目标
+        local newCFrame = CFrame.new(GetFollowPosition(), targetRoot.Position)
+        RootPart.CFrame = newCFrame
+        RootPart.Velocity = Vector3.zero
+        
+        -- 可选：摄像头跟随
+        Camera.CFrame = CFrame.lookAt(
+            Camera.CFrame.Position,
+            targetRoot.Position
+        )
+    end)
+    
+    -- 技能释放部分 --
+    local function ExecuteSkills()
+        -- PingCheck
+        local args1 = {
+            [1] = {
+                ["Goal"] = "PingCheck",
+                ["Time"] = os.time()
+            }
+        }
+        Character.Communicate:FireServer(unpack(args1))
+        task.wait(0.1)
+        
+        -- 检查Vanishing Kick
+        local vanishingKick = LocalPlayer.Backpack:FindFirstChild("Vanishing Kick") or 
+                             Character:FindFirstChild("Vanishing Kick")
+        
+        if vanishingKick then
+            -- Console Move
+            local args2 = {
+                [1] = {
+                    ["Tool"] = vanishingKick,
+                    ["Goal"] = "Console Move"
+                }
+            }
+            Character.Communicate:FireServer(unpack(args2))
+            task.wait(0.2)
+            
+            -- Auto Use End
+            local args3 = {
+                [1] = {
+                    ["Goal"] = "Auto Use End",
+                    ["Tool"] = vanishingKick
+                }
+            }
+            Character.Communicate:FireServer(unpack(args3))
+        end
+    end
+    
+    -- 执行技能
+    ExecuteSkills()
+    
+    -- 定时解锁
+    task.delay(SETTINGS.LockDuration, function()
+        CancelLock()
+    end)
+end
+
+-- 输入系统初始化 --
+local function SetupInputSystem()
+    -- PC键盘监听
+    UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if not gameProcessed and input.KeyCode == SETTINGS.PcHotkey then
+            StartLockTarget()
+        end
+    end)
+    
+    -- 移动端按钮监听
+    if UserInputService.TouchEnabled then
+        local lockButton, toggleButton = CreateMobileUI()
+        if lockButton then
+            lockButton.Activated:Connect(StartLockTarget)
+        end
+    end
+end
+
+-- 角色安全系统 --
+local function SetupCharacterSafety()
+    LocalPlayer.CharacterAdded:Connect(function(newChar)
+        Character = newChar
+        Humanoid = newChar:WaitForChild("Humanoid")
+        RootPart = newChar:WaitForChild("HumanoidRootPart")
+        
+        -- 确保属性重置
+        CancelLock()
+        
+        -- 重新创建UI
+        if UserInputService.TouchEnabled then
+            if mobileUI.screenGui then
+                mobileUI.screenGui:Destroy()
+            end
+            CreateMobileUI()
+        end
+    end)
+end
+
+-- 主初始化函数 --
+local function Initialize()
+    SetupCharacterSafety()
+    SetupInputSystem()
+    
+    -- 初始属性设置
+    Humanoid:SetAttribute("IsLocked", false)
+    
+    print("锁定目标系统已加载 | 按 "..tostring(SETTINGS.PcHotkey).." 键或使用按钮触发")
+end
+
+-- 启动系统 --
+Initialize()
